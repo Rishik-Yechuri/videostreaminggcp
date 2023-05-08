@@ -23,7 +23,7 @@ const runtimeOpts = {
     timeoutSeconds: 540, // Increase the timeout to 60 seconds
 };
 
-exports.registerUser = functions.https.onRequest(async (req, res) => {
+/*exports.registerUser = functions.https.onRequest(async (req, res) => {
     if (req.method !== 'POST') {
         res.status(405).send('Method Not Allowed');
         return;
@@ -52,9 +52,50 @@ exports.registerUser = functions.https.onRequest(async (req, res) => {
     } catch (error) {
         res.status(400).send({ success: false, error: error.message });
     }
+});*/
+exports.registerUser = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
+
+    const { email, password, username, bio } = req.body;
+
+    try {
+        const userRecord = await admin.auth().createUser({ email, password });
+        const userId = userRecord.uid;
+
+        const userData = {
+            email,
+            username: username || email,
+            profilePic: '',
+            bio: bio || '',
+            accountCreation: admin.firestore.FieldValue.serverTimestamp(),
+        };
+
+        await admin.firestore().collection('users').doc(userId).set(userData);
+
+        // Generate a signed URL for uploading the profile picture
+        const bucket = admin.storage().bucket('holdvideos');
+        const filename = `userInfo-${userId}/profilePic.jpg`;
+        const fileRef = bucket.file(filename);
+
+        const signedUrlOptions = {
+            version: 'v4',
+            action: 'write',
+            expires: Date.now() + 15 * 60 * 1000, // 15 minutes
+            contentType: 'image/jpeg',
+        };
+
+        const signedUrl = await fileRef.getSignedUrl(signedUrlOptions);
+
+        res.status(200).send({ success: true, userId, signedUrl });
+    } catch (error) {
+        res.status(400).send({ success: false, error: error.message });
+    }
 });
 
-exports.signInUser = functions.runWith(runtimeOpts).https.onRequest(async (req, res) => {
+exports.signInUser = functions.https.onRequest(async (req, res) => {
     if (req.method !== 'POST') {
         res.status(405).send('Method Not Allowed');
         return;
@@ -85,7 +126,7 @@ exports.generateSignedUrl = functions.https.onRequest(async (req, res) => {
         return;
     }
 
-    const authToken = req.headers.authorization;
+    const authToken = req.headers.auth;
 
     if (!authToken) {
         res.status(401).send('Unauthorized: No token provided');
@@ -144,5 +185,57 @@ exports.generateSignedUrl = functions.https.onRequest(async (req, res) => {
         });
     } catch (error) {
         res.status(401).send('Unauthorized: Invalid token,' + authToken + " Error: " + error);
+    }
+});
+
+exports.updateUserInfo = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
+
+    const { username, bio, updateProfilePic } = req.body;
+    const idToken = req.headers.auth;
+
+    if (!idToken) {
+        res.status(400).send({ success: false, error: 'ID token is required' });
+        return;
+    }
+    try {
+        const decodedToken = await admin.auth().verifyIdToken(idToken);
+        const userId = decodedToken.uid;
+        const userRef = admin.firestore().collection('users').doc(userId);
+
+        const updates = {};
+
+        if (username) {
+            updates.username = username;
+        }
+
+        if (bio) {
+            updates.bio = bio;
+        }
+
+        let signedUrl = null;
+
+        if (updateProfilePic) {
+            const bucket = storage.bucket('holdvideos');
+            const filename = `userInfo-${userId}/profilePic.jpg`;
+            const fileRef = bucket.file(filename);
+            const options = {
+                version: 'v4',
+                action: 'write',
+                expires: Date.now() + 15 * 60 * 1000, // 15 minutes
+                contentType: 'image/jpeg',
+            };
+            signedUrl = await fileRef.getSignedUrl(options);
+            updates.profilePic = `https://storage.googleapis.com/${bucket.name}/${filename}`;
+        }
+
+        await userRef.set(updates, { merge: true });
+
+        res.status(200).send({ success: true, message: 'User info updated', signedUrl });
+    } catch (error) {
+        res.status(400).send({ success: false, error: error.message, token: idToken });
     }
 });
