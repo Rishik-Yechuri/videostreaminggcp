@@ -150,7 +150,14 @@ exports.generateSignedUrl = functions.https.onRequest(async (req, res) => {
         }
 
         if (Object.keys(videoData).length > 0) {
-            await admin.firestore().collection('videos').doc(videoId).set(videoData, {merge: true});
+            const videoRef = admin.firestore().collection('videos').doc(videoId);
+            const userVideoRef = userRef.collection('videos').doc(videoId);
+
+            // Write to 'videos' collection and user's 'videos' subcollection
+            await Promise.all([
+                videoRef.set(videoData, {merge: true}),
+                userVideoRef.set(videoData, {merge: true})
+            ]);
         }
 
         res.status(200).send({
@@ -162,6 +169,7 @@ exports.generateSignedUrl = functions.https.onRequest(async (req, res) => {
         res.status(401).send('Unauthorized: Invalid token,' + authToken + " Error: " + error);
     }
 });
+
 
 
 exports.updateUser = functions.https.onRequest(async (req, res) => {
@@ -258,10 +266,16 @@ exports.updateVideo = functions.https.onRequest(async (req, res) => {
             if (metadata.title) updateData.title = metadata.title;
             if (metadata.description) updateData.description = metadata.description;
         }
+
         if (Object.keys(updateData).length > 0) {
-            await videoDocRef.update(updateData);
+            const userVideoDocRef = admin.firestore().collection('users').doc(userId).collection('videos').doc(videoId);
+
+            // Update video data in both 'videos' collection and user's 'videos' subcollection
+            await Promise.all([
+                videoDocRef.update(updateData),
+                userVideoDocRef.update(updateData)
+            ]);
         }
-        //await videoDocRef.update(updateData);
 
         const signedUrlOptionsVideo = {
             version: 'v4',
@@ -295,6 +309,7 @@ exports.updateVideo = functions.https.onRequest(async (req, res) => {
         res.status(401).send("Error: " + error);
     }
 });
+
 exports.deleteVideo = functions.https.onRequest(async (req, res) => {
     if (req.method !== 'POST') {
         res.status(405).send('Method Not Allowed');
@@ -322,14 +337,21 @@ exports.deleteVideo = functions.https.onRequest(async (req, res) => {
             bucket.file(thumbnailFileName).delete()
         ]);
 
-        // Delete metadata from Firestore
-        await admin.firestore().collection('videos').doc(videoId).delete();
+        // Delete metadata from Firestore in both 'videos' collection and user's 'videos' subcollection
+        const videoDocRef = admin.firestore().collection('videos').doc(videoId);
+        const userVideoDocRef = admin.firestore().collection('users').doc(userId).collection('videos').doc(videoId);
+
+        await Promise.all([
+            videoDocRef.delete(),
+            userVideoDocRef.delete()
+        ]);
 
         res.status(200).send({success: true, message: 'Video and metadata deleted successfully.'});
     } catch (error) {
-        res.status(401).send('Unauthorized: Invalid token, ' + authToken + ' Error: ' + error);
+        res.status(401).send('Error: ' + error);
     }
 });
+
 exports.getUserDetails = functions.https.onRequest(async (req, res) => {
     if (req.method !== 'GET') {
         res.status(405).send('Method Not Allowed');
