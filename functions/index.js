@@ -13,46 +13,11 @@ const bucket = storage.bucket('holdvideos');
 admin.initializeApp();
 const firestore = admin.firestore();
 
-const upload = Multer({
-    storage: Multer.memoryStorage(),
-    limits: {
-        fileSize: 50 * 1024 * 1024,
-    },
-});
 const runtimeOpts = {
     timeoutSeconds: 540, // Increase the timeout to 60 seconds
 };
 
-/*exports.registerUser = functions.https.onRequest(async (req, res) => {
-    if (req.method !== 'POST') {
-        res.status(405).send('Method Not Allowed');
-        return;
-    }
 
-    const { email, password } = req.body;
-
-    try {
-        const userRecord = await admin.auth().createUser({ email, password });
-        //const customToken = await admin.auth().createCustomToken(userRecord.uid);
-
-        // Exchange the custom token for an ID token
-       // const decodedToken = await admin.auth().verifyIdToken(customToken);
-        //const idToken = decodedToken.token;
-        const apiKey = 'AIzaSyDf-zcmQxzLO1vq1zyWfokwqEJ3c_gNubI'; // Replace with your Firebase API Key
-
-        // Authenticate user and retrieve ID token using Google Identity Platform REST API
-        const response = await axios.post(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${apiKey}`, {
-            email,
-            password,
-            returnSecureToken: true,
-        });
-
-        const idToken = response.data.idToken;
-        res.status(200).send({ success: true, token: idToken });
-    } catch (error) {
-        res.status(400).send({ success: false, error: error.message });
-    }
-});*/
 exports.registerUser = functions.https.onRequest(async (req, res) => {
     if (req.method !== 'POST') {
         res.status(405).send('Method Not Allowed');
@@ -154,7 +119,6 @@ exports.generateSignedUrl = functions.https.onRequest(async (req, res) => {
             contentType: 'image/jpeg',
         };
 
-
         const videoId = uuidv4();
         const videoFileName = `${userId}/${videoId}.mp4`; // Assuming .mp4 format
         const videoFile = bucket.file(videoFileName);
@@ -164,7 +128,18 @@ exports.generateSignedUrl = functions.https.onRequest(async (req, res) => {
         const thumbnailFile = bucket.file(thumbnailFileName);
         const thumbnailSignedUrl = await thumbnailFile.getSignedUrl(signedUrlOptionsThumbnail);
 
-        const videoData = {};
+        const userRef = admin.firestore().collection('users').doc(userId);
+        const userDoc = await userRef.get();
+
+        const videoData = {
+            userId: userId,
+            videoUrl: videoFileName,
+            thumbnailUrl: thumbnailFileName,
+            views: 0,
+            likes: 0,
+            dislikes: 0,
+            channelName: userDoc.data().username // Fetching the username for channelName
+        };
 
         if (metadata.title) {
             videoData.title = metadata.title;
@@ -187,6 +162,7 @@ exports.generateSignedUrl = functions.https.onRequest(async (req, res) => {
         res.status(401).send('Unauthorized: Invalid token,' + authToken + " Error: " + error);
     }
 });
+
 
 exports.updateUser = functions.https.onRequest(async (req, res) => {
     if (req.method !== 'POST') {
@@ -278,7 +254,7 @@ exports.updateVideo = functions.https.onRequest(async (req, res) => {
         }
 
         const updateData = {};
-        if(metadata){
+        if (metadata) {
             if (metadata.title) updateData.title = metadata.title;
             if (metadata.description) updateData.description = metadata.description;
         }
@@ -398,7 +374,7 @@ exports.getUserDetails = functions.https.onRequest(async (req, res) => {
             res.status(200).send(userDetails);
         }
     } catch (error) {
-        res.status(500).send({error: error.message });
+        res.status(500).send({error: error.message});
     }
 });
 exports.deleteUser = functions.https.onRequest(async (req, res) => {
@@ -425,7 +401,7 @@ exports.deleteUser = functions.https.onRequest(async (req, res) => {
         const batch = admin.firestore().batch();
 
         // Get the files in the user's folder
-        const [files] = await bucket.getFiles({ prefix: `${userId}/` });
+        const [files] = await bucket.getFiles({prefix: `${userId}/`});
 
         // Delete each video document and its corresponding files in storage
         for (const file of files) {
@@ -447,7 +423,7 @@ exports.deleteUser = functions.https.onRequest(async (req, res) => {
         await batch.commit();
 
         // Get the files in the userInfo-UID folder
-        const [userInfoFiles] = await bucket.getFiles({ prefix: `userInfo-${userId}/` });
+        const [userInfoFiles] = await bucket.getFiles({prefix: `userInfo-${userId}/`});
         for (const file of userInfoFiles) {
             await file.delete();
         }
@@ -460,4 +436,57 @@ exports.deleteUser = functions.https.onRequest(async (req, res) => {
         res.status(500).send({error: error.message});
     }
 });
+exports.getVideo = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'GET') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
 
+    const videoId = req.query.videoId;
+
+    if (!videoId) {
+        res.status(400).send('Bad Request: Missing video ID');
+        return;
+    }
+
+    try {
+        const videoRef = admin.firestore().collection('videos').doc(videoId);
+        const videoDoc = await videoRef.get();
+
+        if (videoDoc.exists) {
+            const videoData = videoDoc.data();
+            const bucket = admin.storage().bucket('holdvideos');
+            const thumbnailFileName = `${videoData.userId}/${videoId}.jpg`;
+
+            const fileRef = bucket.file(thumbnailFileName);
+
+            const signedUrlOptions = {
+                version: 'v4',
+                action: 'read',
+                expires: Date.now() + 15 * 60 * 1000, // 15 minutes
+            };
+
+            const [signedUrl] = await fileRef.getSignedUrl(signedUrlOptions);
+
+            videoData.thumbnailUrl = signedUrl;
+
+            const videoFileName = `${videoData.userId}/${videoId}.mp4`;
+            const videoFileRef = bucket.file(videoFileName);
+
+            const videoSignedUrlOptions = {
+                version: 'v4',
+                action: 'read',
+                expires: Date.now() + 30 * 60 * 1000, // 30 minutes
+            };
+
+            const [videoSignedUrl] = await videoFileRef.getSignedUrl(videoSignedUrlOptions);
+
+            videoData.videoUrl = videoSignedUrl;
+            res.status(200).send(videoData);
+        } else {
+            res.status(404).send('Not Found: Video does not exist');
+        }
+    } catch (error) {
+        res.status(500).send({error: error.message});
+    }
+});
