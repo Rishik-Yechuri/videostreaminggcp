@@ -138,7 +138,9 @@ exports.generateSignedUrl = functions.https.onRequest(async (req, res) => {
             views: 0,
             likes: 0,
             dislikes: 0,
-            channelName: userDoc.data().username // Fetching the username for channelName
+            channelName: userDoc.data().username, // Fetching the username for channelName
+            createdAt: admin.firestore.FieldValue.serverTimestamp() // Add a server timestamp for 'createdAt'
+
         };
 
         if (metadata.title) {
@@ -512,3 +514,43 @@ exports.getVideo = functions.https.onRequest(async (req, res) => {
         res.status(500).send({error: error.message});
     }
 });
+exports.listUserVideos = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
+
+    var pageSize = req.body.pageSize || 10; // Default page size is 10
+    if(pageSize > 10){
+        pageSize = 10;
+    }
+    const startAfter = req.body.listAfter; // Timestamp of the last document in the previous batch
+    const userId = req.body.uid;
+
+    let query = admin.firestore().collection('users').doc(userId).collection('videos')
+        .orderBy('createdAt', 'desc')
+        .limit(pageSize);
+
+    if (startAfter) {
+        // Convert the timestamp to a Firestore Timestamp
+        const startAfterTimestamp = new admin.firestore.Timestamp(startAfter._seconds, startAfter._nanoseconds);
+        query = query.startAfter(startAfterTimestamp);
+    }
+
+    const snapshot = await query.get();
+
+    let videos = [];
+    snapshot.forEach(doc => {
+        let video = doc.data();
+        video.id = doc.id;
+        videos.push(video);
+    });
+
+    res.status(200).send({
+        success: true,
+        videos: videos,
+        // Send the timestamp of the last document if there are more videos to fetch
+        nextStartAfter: videos.length < pageSize ? null : videos[videos.length - 1].createdAt
+    });
+});
+
