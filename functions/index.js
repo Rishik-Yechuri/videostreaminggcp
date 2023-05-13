@@ -553,4 +553,45 @@ exports.listUserVideos = functions.https.onRequest(async (req, res) => {
         nextStartAfter: videos.length < pageSize ? null : videos[videos.length - 1].createdAt
     });
 });
+exports.listAllVideos = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
 
+    var pageSize = req.body.pageSize || 10; // Default page size is 10
+    if(pageSize > 10){
+        pageSize = 10;
+    }
+    const startAfter = req.body.listAfter; // Timestamp of the last document in the previous batch
+
+    try {
+        let query = admin.firestore().collection('videos') // replace 'videos' with your actual collection name
+            .orderBy('createdAt', 'desc')
+            .limit(pageSize);
+
+        if (startAfter) {
+            query = query.startAfter(new admin.firestore.Timestamp(startAfter._seconds, startAfter._nanoseconds));
+        }
+
+        const snapshot = await query.get();
+
+        let videos = [];
+        snapshot.forEach(doc => {
+            let video = doc.data();
+            video.id = doc.id;
+            videos.push(video);
+        });
+
+        const nextStartAfter = videos.length > 0 ? videos[videos.length - 1].createdAt : null;
+
+        res.status(200).send({
+            success: true,
+            videos: videos,
+            // Send the timestamp of the last document if there are more videos to fetch
+            nextStartAfter: nextStartAfter ? { _seconds: nextStartAfter._seconds, _nanoseconds: nextStartAfter._nanoseconds } : null
+        });
+    } catch (error) {
+        res.status(400).send('Bad Request: ' + error);
+    }
+});
