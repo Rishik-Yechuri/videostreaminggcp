@@ -2,13 +2,15 @@ const functions = require('firebase-functions');
 const admin = require('firebase-admin');
 
 const axios = require('axios');
-
+const {get} = require('axios');
+const {GoogleAuth} = require('google-auth-library');
 const {v4: uuidv4} = require('uuid');
 const {IncomingForm} = require('formidable');
 const Multer = require('multer');
 const {Storage} = require('@google-cloud/storage');
 const storage = new Storage();
 const bucket = storage.bucket('holdvideos');
+const videoIntelligence = require('@google-cloud/video-intelligence').v1;
 
 admin.initializeApp();
 const firestore = admin.firestore();
@@ -171,7 +173,6 @@ exports.generateSignedUrl = functions.https.onRequest(async (req, res) => {
         res.status(401).send('Unauthorized: Invalid token,' + authToken + " Error: " + error);
     }
 });
-
 
 
 exports.updateUser = functions.https.onRequest(async (req, res) => {
@@ -467,9 +468,22 @@ exports.getVideo = functions.https.onRequest(async (req, res) => {
     }
 
     const videoId = req.query.videoId;
+    const idToken = req.headers.auth;
 
-    if (!videoId) {
-        res.status(400).send('Bad Request: Missing video ID');
+    if (!idToken) {
+        res.status(400).send('Bad Request: Missing ID token');
+        return;
+    }
+    var userId;
+    try {
+        const decodedToken = await admin.auth().verifyIdToken(idToken);
+        userId = decodedToken.uid;
+    } catch (error) {
+        res.status(500).send({error: error.message});
+
+    }
+    if (!videoId || !userId) {
+        res.status(400).send('Bad Request: Missing video ID or user ID');
         return;
     }
 
@@ -507,6 +521,15 @@ exports.getVideo = functions.https.onRequest(async (req, res) => {
 
             videoData.videoUrl = videoSignedUrl;
             res.status(200).send(videoData);
+
+            // Log this access under the user's document in the 'logs' subcollection
+            const userRef = admin.firestore().collection('users').doc(userId);
+            const logsRef = userRef.collection('logs');
+
+            await logsRef.add({
+                videoId: videoId,
+                timestamp: admin.firestore.FieldValue.serverTimestamp(),
+            });
         } else {
             res.status(404).send('Not Found: Video does not exist');
         }
@@ -514,6 +537,7 @@ exports.getVideo = functions.https.onRequest(async (req, res) => {
         res.status(500).send({error: error.message});
     }
 });
+
 exports.listUserVideos = functions.https.onRequest(async (req, res) => {
     if (req.method !== 'POST') {
         res.status(405).send('Method Not Allowed');
@@ -521,7 +545,7 @@ exports.listUserVideos = functions.https.onRequest(async (req, res) => {
     }
 
     var pageSize = req.body.pageSize || 10; // Default page size is 10
-    if(pageSize > 10){
+    if (pageSize > 10) {
         pageSize = 10;
     }
     const startAfter = req.body.listAfter; // Timestamp of the last document in the previous batch
@@ -560,7 +584,7 @@ exports.listAllVideos = functions.https.onRequest(async (req, res) => {
     }
 
     var pageSize = req.body.pageSize || 10; // Default page size is 10
-    if(pageSize > 10){
+    if (pageSize > 10) {
         pageSize = 10;
     }
     const startAfter = req.body.listAfter; // Timestamp of the last document in the previous batch
@@ -589,9 +613,116 @@ exports.listAllVideos = functions.https.onRequest(async (req, res) => {
             success: true,
             videos: videos,
             // Send the timestamp of the last document if there are more videos to fetch
-            nextStartAfter: nextStartAfter ? { _seconds: nextStartAfter._seconds, _nanoseconds: nextStartAfter._nanoseconds } : null
+            nextStartAfter: nextStartAfter ? {
+                _seconds: nextStartAfter._seconds,
+                _nanoseconds: nextStartAfter._nanoseconds
+            } : null
         });
     } catch (error) {
         res.status(400).send('Bad Request: ' + error);
     }
+});
+exports.requestView = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
+
+    const authToken = req.headers.auth;
+    const videoId = req.body.videoId;
+
+    if (!authToken || !videoId) {
+        res.status(400).send('Bad Request: Missing token or video ID');
+        return;
+    }
+
+    try {
+        const decodedToken = await admin.auth().verifyIdToken(authToken);
+        const userId = decodedToken.uid;
+
+        const videoRef = admin.firestore().collection('videos').doc(videoId);
+        const videoDoc = await videoRef.get();
+
+        if (!videoDoc.exists) {
+            res.status(404).send('Not Found: Video does not exist');
+            return;
+        }
+
+        const userRef = admin.firestore().collection('users').doc(userId);
+        const logsRef = userRef.collection('logs');
+        const logsQuery = logsRef.orderBy('timestamp', 'desc').limit(1);
+        const logsSnapshot = await logsQuery.get();
+
+        if (logsSnapshot.empty) {
+            res.status(400).send('Bad Request: No video has been accessed yet');
+            return;
+        }
+
+        const lastLog = logsSnapshot.docs[0].data();
+
+        if (lastLog.videoId !== videoId) {
+            res.status(400).send('Bad Request: Different video was last accessed');
+            return;
+        }
+
+        const lastLogTimestamp = lastLog.timestamp.toDate();
+        const currentTime = new Date();
+        const timeDiff = currentTime - lastLogTimestamp;
+
+        const videoFilePath = `${videoDoc.data().userId}/${videoId}.mp4`;
+        const videoFile = storage.bucket('holdvideos').file(videoFilePath);
+        const [videoMetadata] = await videoFile.getMetadata();
+
+        const videoDuration = videoMetadata.timeCreated ? (videoMetadata.timeCreated / 1000) : 0; // Assuming the video duration is in seconds
+        const requiredTimeDiff = videoDuration * 0.8 * 1000; // Convert to milliseconds
+
+        if (timeDiff < requiredTimeDiff) {
+            res.status(400).send('Bad Request: Not enough time has passed since the video was accessed');
+            return;
+        }
+
+        // If all checks pass, increment the view count
+        await videoRef.update({views: admin.firestore.FieldValue.increment(1)});
+
+        res.status(200).send({success: true, length: videoDuration});
+    } catch (error) {
+        res.status(500).send({error: error.message});
+    }
+});
+
+exports.onVideoUpload = functions.storage.bucket('holdvideos').object().onFinalize(async (object) => {
+    if (!object.name.endsWith('.mp4')) {
+        return;
+    }
+
+    const videoPath = object.name;
+    const bucketName = 'holdvideos';
+    const gcsUri = `gs://${bucketName}/${videoPath}`;
+
+    const [operation] = await client.annotateVideo({
+        inputUri: gcsUri,
+        features: ['SHOT_CHANGE_DETECTION'],
+    });
+
+    const [operationResult] = await operation.promise();
+    const annotations = operationResult.annotationResults[0];
+
+    let videoDuration = 0;
+    if (annotations.shotAnnotations) {
+        annotations.shotAnnotations.forEach((shot) => {
+            const startSeconds = shot.start_time_offset.seconds || 0;
+            const startNanos = shot.start_time_offset.nanos || 0;
+            const endSeconds = shot.end_time_offset.seconds || 0;
+            const endNanos = shot.end_time_offset.nanos || 0;
+            const start = startSeconds + startNanos * 1e-9;
+            const end = endSeconds + endNanos * 1e-9;
+            videoDuration += end - start;
+        });
+    }
+    const videoId = videoPath.split("/")[1].split(".mp4")[0];
+    const videoRef = admin.firestore().collection('videos').doc(videoId);
+
+    await videoRef.update({length: videoDuration});
+
+    return `Video Duration: ${videoDuration}`;
 });
