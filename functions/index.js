@@ -690,39 +690,65 @@ exports.requestView = functions.https.onRequest(async (req, res) => {
     }
 });
 
-exports.onVideoUpload = functions.storage.bucket('holdvideos').object().onFinalize(async (object) => {
-    if (!object.name.endsWith('.mp4')) {
+exports.addViewToVideo = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
         return;
     }
 
-    const videoPath = object.name;
-    const bucketName = 'holdvideos';
-    const gcsUri = `gs://${bucketName}/${videoPath}`;
+    const tokenId = req.headers.auth;
+    const videoId = req.body.videoId;
 
-    const [operation] = await client.annotateVideo({
-        inputUri: gcsUri,
-        features: ['SHOT_CHANGE_DETECTION'],
-    });
-
-    const [operationResult] = await operation.promise();
-    const annotations = operationResult.annotationResults[0];
-
-    let videoDuration = 0;
-    if (annotations.shotAnnotations) {
-        annotations.shotAnnotations.forEach((shot) => {
-            const startSeconds = shot.start_time_offset.seconds || 0;
-            const startNanos = shot.start_time_offset.nanos || 0;
-            const endSeconds = shot.end_time_offset.seconds || 0;
-            const endNanos = shot.end_time_offset.nanos || 0;
-            const start = startSeconds + startNanos * 1e-9;
-            const end = endSeconds + endNanos * 1e-9;
-            videoDuration += end - start;
-        });
+    if (!tokenId || !videoId) {
+        res.status(400).send('Bad Request: Missing token or video ID');
+        return;
     }
-    const videoId = videoPath.split("/")[1].split(".mp4")[0];
-    const videoRef = admin.firestore().collection('videos').doc(videoId);
 
-    await videoRef.update({length: videoDuration});
+    try {
+        // verify the ID token first
+        const decodedToken = await admin.auth().verifyIdToken(tokenId);
+        const uid = decodedToken.uid;
 
-    return `Video Duration: ${videoDuration}`;
+        // Check if the user has already viewed the video
+        const userRef = admin.firestore().collection('users').doc(uid);
+        const likesRef = userRef.collection('likes').doc(videoId);
+        const likeSnapshot = await likesRef.get();
+
+        if (likeSnapshot.exists) {
+            // User has already viewed the video
+            res.status(200).send({
+                success: true,
+                message: 'User has already viewed this video'
+            });
+            return;
+        }
+
+        // User hasn't viewed the video yet, add a like
+        const timestamp = admin.firestore.Timestamp.now();
+        await likesRef.set({
+            videoId: videoId,
+            timestamp: timestamp
+        });
+        // Get the video document to find the creatorId
+        // Increment the view count on the video
+        const videoRef = admin.firestore().collection('videos').doc(videoId);
+        const videoSnapshot = await videoRef.get();
+        const videoData = videoSnapshot.data();
+        //const userVideoRef = admin.firestore().collection('users').doc(uid).collection("videos").doc(videoId);
+
+        await videoRef.update({
+            views: admin.firestore.FieldValue.increment(1)
+        });
+        const creatorRef = admin.firestore().collection('users').doc(videoData.userId);
+        const creatorVideoRef = creatorRef.collection('videos').doc(videoId);
+        await creatorVideoRef.update({
+            views: admin.firestore.FieldValue.increment(1)
+        });
+        res.status(200).send({
+            success: true,
+            message: 'View added successfully'
+        });
+    } catch (error) {
+        res.status(400).send('Bad Request: ' + error);
+    }
 });
