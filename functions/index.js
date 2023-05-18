@@ -839,3 +839,77 @@ exports.reactToVideo = functions.https.onRequest(async (req, res) => {
         res.status(400).send('Bad Request: ' + error);
     }
 });
+exports.addComment = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
+    const commentText = req.body.comment;
+    const videoId = req.body.videoId;
+    const type = req.body.type; // should be either 'comment' or 'reply'
+    const parentId = req.body.parentId || null;
+    const userToken = req.headers.auth;
+    try {
+        const decodedToken = await admin.auth().verifyIdToken(userToken);
+        const uid = decodedToken.uid;
+        const newComment = {
+            userId: uid,
+            text: commentText,
+            timestamp: admin.firestore.FieldValue.serverTimestamp(),
+            likes: 0,
+            dislikes: 0,
+            parentId: parentId
+        };
+        const randId = uuidv4();
+        const videoRef = admin.firestore().collection('videos').doc(videoId);
+        // Get the video document to find the creator's id
+        const videoDoc = await videoRef.get();
+        if (!videoDoc.exists) {
+            res.status(400).send('Video not found');
+            return;
+        }
+        const creatorId = videoDoc.data().userId;
+        // Reference to the creator's videos subcollection
+        const creatorVideoRef = admin.firestore().collection('users').doc(creatorId).collection('videos').doc(videoId);
+        let commentRef;
+        let userCommentRef;
+        if (type === 'comment') {
+            commentRef = videoRef.collection('comments').doc(randId);
+            userCommentRef = creatorVideoRef.collection("comments").doc(randId);
+        } else if (type === 'reply') {
+            if (!parentId) {
+                res.status(400).send('Missing parentID');
+            } else {
+                // Check if parent comment exists
+                const parentCommentRef = videoRef.collection('comments').doc(parentId);
+                const parentCommentSnapshot = await parentCommentRef.get();
+                if (!parentCommentSnapshot.exists) {
+                    res.status(400).send('Parent comment does not exist');
+                    return;
+                }
+                await videoRef.collection("comments").doc(parentId).collection("replies").doc(randId).set(newComment);
+                // await videoRef.set(newComment);
+                await creatorVideoRef.collection("comments").doc(parentId).collection("replies").doc(randId).set(newComment);
+                // await creatorVideoRef.set(newComment);
+                commentRef = videoRef.collection('replies').doc(randId);
+                userCommentRef = creatorVideoRef.collection("replies").doc(randId);
+            }
+        } else {
+            res.status(400).send('Invalid type');
+            return;
+        }
+        const userVideoRef = admin.firestore().collection('users').doc(videoId);
+
+        // Add the new comment or reply to the appropriate subcollection
+        //await commentRef.doc(randId);
+        await commentRef.set(newComment);
+        //await userCommentRef.doc(randId);
+        await userCommentRef.set(newComment);
+        res.status(200).send({
+            success: true,
+            message: 'Comment added successfully'
+        });
+    } catch (error) {
+        res.status(400).send('Bad Request: ' + error);
+    }
+});
