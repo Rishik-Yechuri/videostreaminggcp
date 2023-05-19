@@ -913,3 +913,90 @@ exports.addComment = functions.https.onRequest(async (req, res) => {
         res.status(400).send('Bad Request: ' + error);
     }
 });
+exports.deleteComment = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'DELETE') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
+    const videoId = req.body.videoId;
+    const commentId = req.body.commentId;
+    const type = req.body.type; // should be either 'comment' or 'reply'
+    const parentId = req.body.parentId || null;
+    const userToken = req.headers.auth;
+    try {
+        const decodedToken = await admin.auth().verifyIdToken(userToken);
+        const uid = decodedToken.uid;
+        const vidId = commentId;
+        const videoRef = admin.firestore().collection('videos').doc(videoId);
+        // Get the video document to find the creator's id
+        const videoDoc = await videoRef.get();
+        if (!videoDoc.exists) {
+            res.status(400).send('Video not found');
+            return;
+        }
+        const creatorId = videoDoc.data().userId;
+        // Reference to the creator's videos subcollection
+        const creatorVideoRef = admin.firestore().collection('users').doc(creatorId).collection('videos').doc(videoId);
+        let commentRef;
+        let userCommentRef;
+        if (type === 'comment') {
+            await deleteCommentAndReplies(videoRef.collection('comments').doc(vidId), creatorVideoRef.collection('comments').doc(vidId), uid,creatorId);
+        } else if (type === 'reply') {
+            if (!parentId) {
+                res.status(400).send('Missing parentID');
+                return;
+            }
+            await deleteCommentAndReplies(videoRef.collection("comments").doc(parentId).collection("replies").doc(vidId), creatorVideoRef.collection("comments").doc(parentId).collection("replies").doc(vidId), uid,creatorId);
+        } else {
+            res.status(400).send('Invalid type');
+            return;
+        }
+
+        res.status(200).send({
+            success: true,
+            message: 'Comment removed successfully'
+        });
+    } catch (error) {
+        res.status(400).send('Bad Request: ' + error);
+    }
+
+    async function deleteCommentAndReplies(commentRef, creatorCommentRef, uid, creatorId) {
+        const commentDoc = await commentRef.get();
+        if (!commentDoc.exists) {
+            res.status(400).send('Comment does not exist');
+            return;
+        }
+        if (commentDoc.data().userId !== uid) {
+            res.status(400).send('User does not have permission to delete this comment');
+            return;
+        }
+
+        // Delete replies directly under the comment
+        const repliesSnapshot = await commentRef.collection('replies').get();
+        for (const doc of repliesSnapshot.docs) {
+            //if (doc.data().userId === uid) {
+            await admin.firestore().collection('videos').doc(videoId).collection("replies").doc(doc.id).delete();
+            await admin.firestore().collection("users").doc(creatorId).collection('videos').doc(videoId).collection("replies").doc(doc.id).delete();
+            const creatorReplyDoc = await creatorCommentRef.collection('replies').doc(doc.id).get();
+            if (creatorReplyDoc.exists) {
+                await creatorReplyDoc.ref.delete();
+            }
+            const replyDoc = await commentRef.collection('replies').doc(doc.id).get();
+            if (replyDoc.exists) {
+                await replyDoc.ref.delete();
+            }
+            // }
+        }
+
+        await commentRef.delete();
+        const creatorCommentDoc = await creatorCommentRef.get();
+        if (creatorCommentDoc.exists) {
+            await creatorCommentRef.delete();
+        }
+        const commentDoc2 = await commentRef.get();
+        if (commentDoc2.exists) {
+            await commentRef.delete();
+        }
+    }
+});
+
