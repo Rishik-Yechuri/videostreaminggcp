@@ -921,7 +921,7 @@ exports.deleteComment = functions.https.onRequest(async (req, res) => {
     const videoId = req.body.videoId;
     const commentId = req.body.commentId;
     const type = req.body.type; // should be either 'comment' or 'reply'
-    const parentId = req.body.parentId || null;
+    //const parentId = req.body.parentId || null;
     const userToken = req.headers.auth;
     try {
         const decodedToken = await admin.auth().verifyIdToken(userToken);
@@ -942,11 +942,18 @@ exports.deleteComment = functions.https.onRequest(async (req, res) => {
         if (type === 'comment') {
             await deleteCommentAndReplies(videoRef.collection('comments').doc(vidId), creatorVideoRef.collection('comments').doc(vidId), uid,creatorId);
         } else if (type === 'reply') {
-            if (!parentId) {
+            /*if (!parentId) {
                 res.status(400).send('Missing parentID');
                 return;
-            }
-            await deleteCommentAndReplies(videoRef.collection("comments").doc(parentId).collection("replies").doc(vidId), creatorVideoRef.collection("comments").doc(parentId).collection("replies").doc(vidId), uid,creatorId);
+            }*/
+            const replyDoc = await admin.firestore().collection("videos").doc(videoId).collection("replies").doc(commentId).get();
+            const parentId = replyDoc.data().parentId;
+            await admin.firestore().collection("videos").doc(videoId).collection("replies").doc(commentId).delete();
+            await admin.firestore().collection("videos").doc(videoId).collection("comments").doc(parentId).collection("replies").doc(commentId).delete();
+
+            await admin.firestore().collection("users").doc(creatorId).collection("videos").doc(videoId).collection("replies").doc(commentId).delete();
+            await admin.firestore().collection("users").doc(creatorId).collection("videos").doc(videoId).collection("comments").doc(parentId).collection("replies").doc(commentId).delete();
+            // await deleteCommentAndReplies(videoRef.collection("comments").doc(parentId).collection("replies").doc(vidId), creatorVideoRef.collection("comments").doc(parentId).collection("replies").doc(vidId), uid,creatorId);
         } else {
             res.status(400).send('Invalid type');
             return;
