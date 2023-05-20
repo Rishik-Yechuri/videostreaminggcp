@@ -1006,4 +1006,102 @@ exports.deleteComment = functions.https.onRequest(async (req, res) => {
         }
     }
 });
+exports.reactToComment = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
 
+    const tokenId = req.headers.auth;
+    const videoId = req.body.videoId;
+    const commentId = req.body.commentId;
+    const type = req.body.type;
+    const action = req.body.action; // 'like', 'dislike', or 'none'
+    if (!tokenId || !videoId || !action) {
+        res.status(400).send('Bad Request: Missing token, video ID, or action');
+        return;
+    }
+
+    if (!['like', 'dislike', 'none'].includes(action)) {
+        res.status(400).send('Bad Request: Invalid action');
+        return;
+    }
+
+    try {
+        // verify the ID token first
+        const decodedToken = await admin.auth().verifyIdToken(tokenId);
+        const uid = decodedToken.uid;
+
+        // Check the current reaction to the video
+        const userRef = admin.firestore().collection('users').doc(uid);
+        const likesRef = userRef.collection('commentlikes').doc(commentId);
+        const likeSnapshot = await likesRef.get();
+
+        let currentReaction = 'none';
+        if (likeSnapshot.exists) {
+            currentReaction = likeSnapshot.data().reaction;
+        }
+
+        if (currentReaction === action) {
+            // The new action is the same as the current reaction, do nothing
+            res.status(200).send({
+                success: true,
+                message: 'No action taken'
+            });
+            return;
+        }
+
+        // Update the reaction
+        const timestamp = admin.firestore.Timestamp.now();
+        await likesRef.set({
+            videoId: videoId,
+            timestamp: timestamp,
+            reaction: action
+        });
+
+        // Get the video document to find the creatorId
+        const videoRef = admin.firestore().collection('videos').doc(videoId);
+        const videoSnapshot = await videoRef.get();
+        const videoData = videoSnapshot.data();
+
+        // Depending on the current and new reactions, update the like and dislike counts on the video
+        const updates = {};
+
+        if (currentReaction === 'like') {
+            updates.likes = admin.firestore.FieldValue.increment(-1);
+        } else if (currentReaction === 'dislike') {
+            updates.dislikes = admin.firestore.FieldValue.increment(-1);
+        }
+
+        if (action === 'like') {
+            updates.likes = admin.firestore.FieldValue.increment(1);
+        } else if (action === 'dislike') {
+            updates.dislikes = admin.firestore.FieldValue.increment(1);
+        }
+
+        //await videoRef.update(updates);
+
+        // Update the video in the creator's subcollection
+        const creatorRef = admin.firestore().collection('users').doc(videoData.userId);
+        const creatorVideoRef = creatorRef.collection('videos').doc(videoId);
+        //await creatorVideoRef.update(updates);
+        if(type === 'reply'){
+            const replyDoc = await admin.firestore().collection("videos").doc(videoId).collection("replies").doc(commentId).get();
+            const parentId = replyDoc.data().parentId;
+            await admin.firestore().collection("videos").doc(videoId).collection("replies").doc(commentId).update(updates);
+            await admin.firestore().collection("videos").doc(videoId).collection("comments").doc(parentId).collection("replies").doc(commentId).update(updates);
+
+            await admin.firestore().collection("users").doc(videoData.userId).collection("videos").doc(videoId).collection("replies").doc(commentId).update(updates);
+            await admin.firestore().collection("users").doc(videoData.userId).collection("videos").doc(videoId).collection("comments").doc(parentId).collection("replies").doc(commentId).update(updates);
+        }else if(type === 'comment'){
+            await admin.firestore().collection("videos").doc(videoId).collection("comments").doc(commentId).update(updates);
+            await admin.firestore().collection("users").doc(videoData.userId).collection("videos").doc(videoId).collection("comments").doc(commentId).update(updates);
+        }
+        res.status(200).send({
+            success: true,
+            message: 'Reaction updated successfully'
+        });
+    } catch (error) {
+        res.status(400).send('Bad Request: ' + error);
+    }
+});
