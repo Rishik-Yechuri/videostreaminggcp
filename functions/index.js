@@ -1063,22 +1063,41 @@ exports.reactToComment = functions.https.onRequest(async (req, res) => {
         const videoRef = admin.firestore().collection('videos').doc(videoId);
         const videoSnapshot = await videoRef.get();
         const videoData = videoSnapshot.data();
+// Get the comment document
+        var commentRef = null// = admin.firestore().collection('videos').doc(videoId).collection('comments').doc(commentId);
+        if(type==='comment'){
+            commentRef = admin.firestore().collection('videos').doc(videoId).collection('comments').doc(commentId);
+        }else{
+            commentRef = admin.firestore().collection('videos').doc(videoId).collection('replies').doc(commentId);
+        }
+        const commentSnapshot = await commentRef.get();
+        const commentData = commentSnapshot.data();
 
+// Calculate the new number of likes and dislikes
+        let likes = commentData.likes || 0;
+        let dislikes = commentData.dislikes || 0;
         // Depending on the current and new reactions, update the like and dislike counts on the video
         const updates = {};
 
         if (currentReaction === 'like') {
-            updates.likes = admin.firestore.FieldValue.increment(-1);
+            //await updates.likes = admin.firestore.FieldValue.increment(-1);
+            likes--;
         } else if (currentReaction === 'dislike') {
-            updates.dislikes = admin.firestore.FieldValue.increment(-1);
+            //await updates.dislikes = admin.firestore.FieldValue.increment(-1);
+            dislikes--;
         }
 
         if (action === 'like') {
-            updates.likes = admin.firestore.FieldValue.increment(1);
+            likes++;
+          // await updates.likes = admin.firestore.FieldValue.increment(1);
         } else if (action === 'dislike') {
-            updates.dislikes = admin.firestore.FieldValue.increment(1);
+            dislikes++;
+           //await  updates.dislikes = admin.firestore.FieldValue.increment(1);
         }
-
+        updates.likes = likes;
+        updates.dislikes = dislikes;
+        const totalReactions = likes + dislikes;
+        updates.likeDislikeRatio = totalReactions === 0 ? 0 : updates.likes / totalReactions;
         //await videoRef.update(updates);
 
         // Update the video in the creator's subcollection
@@ -1089,9 +1108,11 @@ exports.reactToComment = functions.https.onRequest(async (req, res) => {
             const replyDoc = await admin.firestore().collection("videos").doc(videoId).collection("replies").doc(commentId).get();
             const parentId = replyDoc.data().parentId;
             await admin.firestore().collection("videos").doc(videoId).collection("replies").doc(commentId).update(updates);
+
             await admin.firestore().collection("videos").doc(videoId).collection("comments").doc(parentId).collection("replies").doc(commentId).update(updates);
 
             await admin.firestore().collection("users").doc(videoData.userId).collection("videos").doc(videoId).collection("replies").doc(commentId).update(updates);
+
             await admin.firestore().collection("users").doc(videoData.userId).collection("videos").doc(videoId).collection("comments").doc(parentId).collection("replies").doc(commentId).update(updates);
         }else if(type === 'comment'){
             await admin.firestore().collection("videos").doc(videoId).collection("comments").doc(commentId).update(updates);
@@ -1103,5 +1124,54 @@ exports.reactToComment = functions.https.onRequest(async (req, res) => {
         });
     } catch (error) {
         res.status(400).send('Bad Request: ' + error);
+    }
+});
+exports.listComments = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
+
+    const videoId = req.body.videoId;
+    let numComments = req.body.numComments || 10; // Default page size is 10
+    if (numComments > 10) {
+        numComments = 10;
+    }
+    const startAfter = req.body.startAfter; // Object containing the like/dislike ratio and timestamp of the last document in the previous batch
+    //const authToken = req.headers.auth;
+
+    // TODO: Validate authToken here
+
+    const db = admin.firestore();
+    const commentsRef = db.collection('videos').doc(videoId).collection('comments');
+
+    let query = commentsRef
+        .orderBy('likeDislikeRatio', 'desc')
+        .orderBy('timestamp', 'desc') // Assuming each comment has a 'timestamp' field
+        .limit(numComments);
+
+    if (startAfter) {
+        // Convert the timestamp to a Firestore Timestamp
+        const startAfterTimestamp = new admin.firestore.Timestamp(startAfter.timestamp._seconds, startAfter.timestamp._nanoseconds);
+        query = query.startAfter(startAfter.likeDislikeRatio, startAfterTimestamp);
+    }
+
+    try {
+        const snapshot = await query.get();
+        const comments = [];
+        snapshot.forEach(doc => {
+            const data = doc.data();
+            data.id = doc.id;
+            comments.push(data);
+        });
+
+        res.status(200).send({
+            success: true,
+            comments: comments,
+            // Send the likeDislikeRatio and timestamp of the last document if there are more comments to fetch
+            nextStartAfter: comments.length < numComments ? null : { likeDislikeRatio: comments[comments.length - 1].likeDislikeRatio, timestamp: comments[comments.length - 1].timestamp }
+        });
+    } catch (error) {
+        res.status(500).send(error);
     }
 });
