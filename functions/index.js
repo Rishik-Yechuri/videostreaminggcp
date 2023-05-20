@@ -940,7 +940,7 @@ exports.deleteComment = functions.https.onRequest(async (req, res) => {
         let commentRef;
         let userCommentRef;
         if (type === 'comment') {
-            await deleteCommentAndReplies(videoRef.collection('comments').doc(vidId), creatorVideoRef.collection('comments').doc(vidId), uid,creatorId);
+            await deleteCommentAndReplies(videoRef.collection('comments').doc(vidId), creatorVideoRef.collection('comments').doc(vidId), uid, creatorId);
         } else if (type === 'reply') {
             /*if (!parentId) {
                 res.status(400).send('Missing parentID');
@@ -1065,9 +1065,9 @@ exports.reactToComment = functions.https.onRequest(async (req, res) => {
         const videoData = videoSnapshot.data();
 // Get the comment document
         var commentRef = null// = admin.firestore().collection('videos').doc(videoId).collection('comments').doc(commentId);
-        if(type==='comment'){
+        if (type === 'comment') {
             commentRef = admin.firestore().collection('videos').doc(videoId).collection('comments').doc(commentId);
-        }else{
+        } else {
             commentRef = admin.firestore().collection('videos').doc(videoId).collection('replies').doc(commentId);
         }
         const commentSnapshot = await commentRef.get();
@@ -1089,10 +1089,10 @@ exports.reactToComment = functions.https.onRequest(async (req, res) => {
 
         if (action === 'like') {
             likes++;
-          // await updates.likes = admin.firestore.FieldValue.increment(1);
+            // await updates.likes = admin.firestore.FieldValue.increment(1);
         } else if (action === 'dislike') {
             dislikes++;
-           //await  updates.dislikes = admin.firestore.FieldValue.increment(1);
+            //await  updates.dislikes = admin.firestore.FieldValue.increment(1);
         }
         updates.likes = likes;
         updates.dislikes = dislikes;
@@ -1104,7 +1104,7 @@ exports.reactToComment = functions.https.onRequest(async (req, res) => {
         const creatorRef = admin.firestore().collection('users').doc(videoData.userId);
         const creatorVideoRef = creatorRef.collection('videos').doc(videoId);
         //await creatorVideoRef.update(updates);
-        if(type === 'reply'){
+        if (type === 'reply') {
             const replyDoc = await admin.firestore().collection("videos").doc(videoId).collection("replies").doc(commentId).get();
             const parentId = replyDoc.data().parentId;
             await admin.firestore().collection("videos").doc(videoId).collection("replies").doc(commentId).update(updates);
@@ -1114,7 +1114,7 @@ exports.reactToComment = functions.https.onRequest(async (req, res) => {
             await admin.firestore().collection("users").doc(videoData.userId).collection("videos").doc(videoId).collection("replies").doc(commentId).update(updates);
 
             await admin.firestore().collection("users").doc(videoData.userId).collection("videos").doc(videoId).collection("comments").doc(parentId).collection("replies").doc(commentId).update(updates);
-        }else if(type === 'comment'){
+        } else if (type === 'comment') {
             await admin.firestore().collection("videos").doc(videoId).collection("comments").doc(commentId).update(updates);
             await admin.firestore().collection("users").doc(videoData.userId).collection("videos").doc(videoId).collection("comments").doc(commentId).update(updates);
         }
@@ -1169,7 +1169,59 @@ exports.listComments = functions.https.onRequest(async (req, res) => {
             success: true,
             comments: comments,
             // Send the likeDislikeRatio and timestamp of the last document if there are more comments to fetch
-            nextStartAfter: comments.length < numComments ? null : { likeDislikeRatio: comments[comments.length - 1].likeDislikeRatio, timestamp: comments[comments.length - 1].timestamp }
+            nextStartAfter: comments.length < numComments ? null : {
+                likeDislikeRatio: comments[comments.length - 1].likeDislikeRatio,
+                timestamp: comments[comments.length - 1].timestamp
+            }
+        });
+    } catch (error) {
+        res.status(500).send(error);
+    }
+});
+exports.listReplies = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
+
+    const videoId = req.body.videoId;
+    const commentId = req.body.commentId; // ID of the parent comment
+    let numReplies = req.body.numReplies || 10; // Default page size is 10
+    if (numReplies > 10) {
+        numReplies = 10;
+    }
+    const startAfter = req.body.startAfter; // Object containing the like/dislike ratio and timestamp of the last document in the previous batch
+
+    // TODO: Validate authToken here
+
+    const db = admin.firestore();
+    const repliesRef = db.collection('videos').doc(videoId).collection('comments').doc(commentId).collection('replies');
+
+    let query = repliesRef
+        .orderBy('likeDislikeRatio', 'desc')
+        .orderBy('timestamp', 'desc') // Assuming each reply has a 'timestamp' field
+        .limit(numReplies);
+
+    if (startAfter) {
+        // Convert the timestamp to a Firestore Timestamp
+        const startAfterTimestamp = new admin.firestore.Timestamp(startAfter.timestamp._seconds, startAfter.timestamp._nanoseconds);
+        query = query.startAfter(startAfter.likeDislikeRatio, startAfterTimestamp);
+    }
+
+    try {
+        const snapshot = await query.get();
+        const replies = [];
+        snapshot.forEach(doc => {
+            const data = doc.data();
+            data.id = doc.id;
+            replies.push(data);
+        });
+
+        res.status(200).send({
+            success: true,
+            replies: replies,
+            // Send the likeDislikeRatio and timestamp of the last document if there are more replies to fetch
+            nextStartAfter: replies.length < numReplies ? null : { likeDislikeRatio: replies[replies.length - 1].likeDislikeRatio, timestamp: replies[replies.length - 1].timestamp }
         });
     } catch (error) {
         res.status(500).send(error);
