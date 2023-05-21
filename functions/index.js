@@ -1227,3 +1227,85 @@ exports.listReplies = functions.https.onRequest(async (req, res) => {
         res.status(500).send(error);
     }
 });
+exports.manageSubscription = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
+
+    const tokenId = req.headers.auth;
+    const targetUserId = req.body.targetUserId;
+    const action = req.body.action; // 'sub', 'unsub', or 'none'
+
+    if (!tokenId || !targetUserId || !action) {
+        res.status(400).send('Bad Request: Missing token, target user ID, or action');
+        return;
+    }
+
+    if (!['sub', 'unsub', 'none'].includes(action)) {
+        res.status(400).send('Bad Request: Invalid action');
+        return;
+    }
+
+    try {
+        // verify the ID token first
+        const decodedToken = await admin.auth().verifyIdToken(tokenId);
+        const uid = decodedToken.uid;
+
+        const db = admin.firestore();
+        const userRef = db.collection('users').doc(uid);
+        const targetUserRef = db.collection('users').doc(targetUserId);
+
+        // Fetch the user and target user documents
+        const userSnapshot = await userRef.get();
+        const targetUserSnapshot = await targetUserRef.get();
+
+        // Check if the target user exists
+        if (!targetUserSnapshot.exists) {
+            res.status(404).send('Target user not found');
+            return;
+        }
+
+        // Check if the user exists
+        if (!userSnapshot.exists) {
+            res.status(404).send('User not found');
+            return;
+        }
+
+        const userData = userSnapshot.data();
+        const targetUserData = targetUserSnapshot.data();
+
+        // Check if the current action matches the requested action
+        const followingSnapshot = await userRef.collection('following').doc(targetUserId).get();
+        const isCurrentlyFollowing = followingSnapshot.exists;
+
+        if ((action === 'sub' && isCurrentlyFollowing) || (action === 'unsub' && !isCurrentlyFollowing)) {
+            res.status(200).send({
+                success: true,
+                message: 'No action taken'
+            });
+            return;
+        }
+
+        if (action === 'sub') {
+            // Add the target user to the user's 'following' subcollection
+            await userRef.collection('following').doc(targetUserId).set(targetUserData);
+
+            // Add the user to the target user's 'followedBy' subcollection
+            await targetUserRef.collection('followedBy').doc(uid).set(userData);
+        } else if (action === 'unsub') {
+            // Remove the target user from the user's 'following' subcollection
+            await userRef.collection('following').doc(targetUserId).delete();
+
+            // Remove the user from the target user's 'followedBy' subcollection
+            await targetUserRef.collection('followedBy').doc(uid).delete();
+        }
+
+        res.status(200).send({
+            success: true,
+            message: 'Subscription updated successfully'
+        });
+    } catch (error) {
+        res.status(400).send('Bad Request: ' + error);
+    }
+});
