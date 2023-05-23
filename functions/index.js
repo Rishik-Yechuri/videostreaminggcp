@@ -8,10 +8,14 @@ const {v4: uuidv4} = require('uuid');
 const {IncomingForm} = require('formidable');
 const Multer = require('multer');
 const {Storage} = require('@google-cloud/storage');
+const { PubSub } = require('@google-cloud/pubsub');
 const storage = new Storage();
 const bucket = storage.bucket('holdvideos');
 const videoIntelligence = require('@google-cloud/video-intelligence').v1;
+const pubSubClient = new PubSub();
+const {SecretManagerServiceClient} =  require('@google-cloud/secret-manager');
 
+const secrets = new SecretManagerServiceClient();
 admin.initializeApp();
 const firestore = admin.firestore();
 
@@ -1308,4 +1312,54 @@ exports.manageSubscription = functions.https.onRequest(async (req, res) => {
     } catch (error) {
         res.status(400).send('Bad Request: ' + error);
     }
+});
+exports.notifyNewVideoUpload = functions.storage.bucket('holdvideos').object().onFinalize(async (object) => {
+    // Check if the uploaded file is an mp4 video
+    if (!object.name.endsWith('.mp4')) {
+        return;
+    }
+
+    // Extract the video ID and user ID from the file name
+    const filePathParts = object.name.split('/');
+    const userId = filePathParts[0];
+    const videoId = filePathParts[1].replace('.mp4', '');
+
+    // Prepare the message data
+    const messageData = {
+        videoId: videoId,
+        userId: userId
+    };
+
+    // Publish the message to the Pub/Sub topic
+    //const dataBuffer = Buffer.from(JSON.stringify(messageData));
+    const secretValue = await getSecretValue('RequiredCloudRunPassword');
+
+    try {
+       // const messageId = await pubSubClient.topic('new-video-uploads').publishMessage({data: dataBuffer});
+        // Make a POST request to the Cloud Run service
+        axios.post('https://uploadnotify2-nm7za3okoq-uc.a.run.app', {
+            message: {
+                data: Buffer.from(JSON.stringify(messageData)).toString('base64')
+            }
+        }, {
+            headers: {
+                'X-Shared-Secret': secretValue
+            }
+        }).catch(error => {
+            console.error('Error sending message to Cloud Run service:', error);
+        });
+//        console.log(`Message ${messageId} published.`);
+    } catch (error) {
+        console.error(`Received error while calling cloud run: ${error.message}`);
+        process.exitCode = 1;
+    }
+    async function getSecretValue(name) {
+        const [version] = await secrets.accessSecretVersion({
+            name: `projects/556024614451/secrets/${name}/versions/latest`,
+        });
+
+        return version.payload?.data?.toString();
+    }
+
+
 });
