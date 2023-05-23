@@ -8,12 +8,13 @@ const {v4: uuidv4} = require('uuid');
 const {IncomingForm} = require('formidable');
 const Multer = require('multer');
 const {Storage} = require('@google-cloud/storage');
-const { PubSub } = require('@google-cloud/pubsub');
+const {PubSub} = require('@google-cloud/pubsub');
 const storage = new Storage();
 const bucket = storage.bucket('holdvideos');
 const videoIntelligence = require('@google-cloud/video-intelligence').v1;
 const pubSubClient = new PubSub();
-const {SecretManagerServiceClient} =  require('@google-cloud/secret-manager');
+const {SecretManagerServiceClient} = require('@google-cloud/secret-manager');
+const e = require("cors");
 
 const secrets = new SecretManagerServiceClient();
 admin.initializeApp();
@@ -1225,7 +1226,10 @@ exports.listReplies = functions.https.onRequest(async (req, res) => {
             success: true,
             replies: replies,
             // Send the likeDislikeRatio and timestamp of the last document if there are more replies to fetch
-            nextStartAfter: replies.length < numReplies ? null : { likeDislikeRatio: replies[replies.length - 1].likeDislikeRatio, timestamp: replies[replies.length - 1].timestamp }
+            nextStartAfter: replies.length < numReplies ? null : {
+                likeDislikeRatio: replies[replies.length - 1].likeDislikeRatio,
+                timestamp: replies[replies.length - 1].timestamp
+            }
         });
     } catch (error) {
         res.status(500).send(error);
@@ -1335,7 +1339,7 @@ exports.notifyNewVideoUpload = functions.storage.bucket('holdvideos').object().o
     const secretValue = await getSecretValue('RequiredCloudRunPassword');
 
     try {
-       // const messageId = await pubSubClient.topic('new-video-uploads').publishMessage({data: dataBuffer});
+        // const messageId = await pubSubClient.topic('new-video-uploads').publishMessage({data: dataBuffer});
         // Make a POST request to the Cloud Run service
         axios.post('https://uploadnotify2-nm7za3okoq-uc.a.run.app', {
             message: {
@@ -1353,6 +1357,7 @@ exports.notifyNewVideoUpload = functions.storage.bucket('holdvideos').object().o
         console.error(`Received error while calling cloud run: ${error.message}`);
         process.exitCode = 1;
     }
+
     async function getSecretValue(name) {
         const [version] = await secrets.accessSecretVersion({
             name: `projects/556024614451/secrets/${name}/versions/latest`,
@@ -1360,6 +1365,44 @@ exports.notifyNewVideoUpload = functions.storage.bucket('holdvideos').object().o
 
         return version.payload?.data?.toString();
     }
+});
+exports.getNotifications = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
 
+    const tokenId = req.headers.auth;
 
+    if (!tokenId) {
+        res.status(400).send('Bad Request: Missing token');
+        return;
+    }
+    try {
+        const db = admin.firestore();
+        const decodedToken = await admin.auth().verifyIdToken(tokenId);
+        const uid = decodedToken.uid;
+        const notificationsRef = db.collection(`users/${uid}/notifications`);
+        // fetch video metadata based on 'createdAt'
+        let snapshot = await notificationsRef.orderBy('createdAt').get();
+        let videoMetadata = [];
+        let batch = db.batch(); // batch operation
+
+        snapshot.forEach(doc => {
+            let data = doc.data();
+            data.id = doc.id; // capture the doc id
+            videoMetadata.push(data);
+            batch.delete(doc.ref);
+
+        });
+        await batch.commit();
+
+        res.status(200).send({
+            videoMetadata: videoMetadata
+        });
+       // return videoMetadata;
+    } catch (error) {
+        console.log('Error:' + error);
+        res.status(400).send('Bad Request: ' + error);
+    }
 });
