@@ -1406,3 +1406,77 @@ exports.getNotifications = functions.https.onRequest(async (req, res) => {
         res.status(400).send('Bad Request: ' + error);
     }
 });
+exports.getToWatch = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
+
+    const tokenId = req.headers.auth;
+    const lastCreatedAt = req.body.timestamp; // Update this line
+    let requestSize = req.body.requestSize;
+
+    if (!tokenId) {
+        res.status(400).send('Bad Request: Missing token');
+        return;
+    }
+
+    // Set requestSize to 10 if it's greater
+    if (!requestSize || requestSize > 10) {
+        requestSize = 10;
+    }
+
+    try {
+        const db = admin.firestore();
+        const decodedToken = await admin.auth().verifyIdToken(tokenId);
+        const uid = decodedToken.uid;
+        const toWatchRef = db.collection(`users/${uid}/towatch`);
+
+        let snapshot;
+        if (lastCreatedAt) {
+            // Convert lastCreatedAt from a Firestore timestamp to a Date object
+            const lastCreatedAtDate = new admin.firestore.Timestamp(lastCreatedAt._seconds, lastCreatedAt._nanoseconds).toDate();
+
+            // Fetch video metadata based on 'createdAt'
+            snapshot = await toWatchRef.orderBy('createdAt', 'desc')
+                .startAfter(lastCreatedAtDate)
+                .limit(requestSize)
+                .get();
+        } else {
+            snapshot = await toWatchRef.orderBy('createdAt', 'desc')
+                .limit(requestSize)
+                .get();
+        }
+
+        if (snapshot.empty) {
+            console.log('No matching documents.');
+            res.status(200).send({ timestamp: null, items: [] }); // Update this line
+            return;
+        }
+
+        let items = [];
+        snapshot.forEach(doc => {
+            let data = doc.data();
+            data.id = doc.id; // capture the doc id
+
+            // Convert 'createdAt' from Firestore timestamp to JavaScript date
+            if (data.createdAt instanceof admin.firestore.Timestamp) {
+                data.createdAt = data.createdAt.toDate();
+            }
+
+            items.push(data);
+        });
+
+
+        // Get the 'createdAt' field of the last document
+        const newLastCreatedAt = items[items.length - 1].createdAt;
+
+        // Convert the date to a Firestore timestamp
+        const newLastCreatedAtTimestamp = admin.firestore.Timestamp.fromDate(newLastCreatedAt);
+
+        res.status(200).send({ timestamp: newLastCreatedAtTimestamp, items: items }); // Update this line
+    } catch (error) {
+        console.log('Error:' + error);
+        res.status(400).send('Bad Request: ' + error);
+    }
+});
