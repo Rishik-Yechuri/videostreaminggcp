@@ -1480,3 +1480,37 @@ exports.getToWatch = functions.https.onRequest(async (req, res) => {
         res.status(400).send('Bad Request: ' + error);
     }
 });
+exports.removeToWatch = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
+
+    const tokenId = req.headers.auth;
+    const videoId = req.body.videoId;
+
+    if (!tokenId) {
+        res.status(400).send('Bad Request: Missing token');
+        return;
+    }
+
+    if (!videoId) {
+        res.status(400).send('Bad Request: Missing videoId');
+        return;
+    }
+
+    try {
+        const db = admin.firestore();
+        const decodedToken = await admin.auth().verifyIdToken(tokenId);
+        const uid = decodedToken.uid;
+        const videoRef = db.doc(`users/${uid}/towatch/${videoId}`);
+
+        // delete the document
+        await videoRef.delete();
+
+        res.status(200).send({ message: `Video ${videoId} removed from towatch list.` });
+    } catch (error) {
+        console.log('Error:' + error);
+        res.status(400).send('Bad Request: ' + error);
+    }
+});
