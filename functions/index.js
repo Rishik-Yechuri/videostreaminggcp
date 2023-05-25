@@ -1,5 +1,6 @@
 const functions = require('firebase-functions');
 const admin = require('firebase-admin');
+const algoliasearch = require('algoliasearch');
 
 const axios = require('axios');
 const {get} = require('axios');
@@ -139,6 +140,7 @@ exports.generateSignedUrl = functions.https.onRequest(async (req, res) => {
         const userDoc = await userRef.get();
 
         const videoData = {
+            objectID: videoId, // Add an objectId for Algolia
             userId: userId,
             videoUrl: videoFileName,
             thumbnailUrl: thumbnailFileName,
@@ -147,7 +149,6 @@ exports.generateSignedUrl = functions.https.onRequest(async (req, res) => {
             dislikes: 0,
             channelName: userDoc.data().username, // Fetching the username for channelName
             createdAt: admin.firestore.FieldValue.serverTimestamp() // Add a server timestamp for 'createdAt'
-
         };
 
         if (metadata.title) {
@@ -167,6 +168,14 @@ exports.generateSignedUrl = functions.https.onRequest(async (req, res) => {
                 videoRef.set(videoData, {merge: true}),
                 userVideoRef.set(videoData, {merge: true})
             ]);
+
+
+            // Initialize Algolia client
+            const client = algoliasearch('TVN98P0Q4O', 'f01acee529c0a1a331f55c87791f6a95');
+            const index = client.initIndex('videos');
+
+            // Add to Algolia index
+            await index.saveObject(videoData);
         }
 
         res.status(200).send({
@@ -175,10 +184,9 @@ exports.generateSignedUrl = functions.https.onRequest(async (req, res) => {
             thumbnailSignedUrl: thumbnailSignedUrl[0],
         });
     } catch (error) {
-        res.status(401).send('Unauthorized: Invalid token,' + authToken + " Error: " + error);
+        res.status(401).send("Error: " + error.message);
     }
 });
-
 
 exports.updateUser = functions.https.onRequest(async (req, res) => {
     if (req.method !== 'POST') {
@@ -283,6 +291,12 @@ exports.updateVideo = functions.https.onRequest(async (req, res) => {
                 videoDocRef.update(updateData),
                 userVideoDocRef.update(updateData)
             ]);
+
+            // Update the video data in Algolia
+            const client = algoliasearch('TVN98P0Q4O', 'f01acee529c0a1a331f55c87791f6a95');
+            const index = client.initIndex('videos');
+            updateData.objectID = videoId;
+            await index.partialUpdateObject(updateData);
         }
 
         const signedUrlOptionsVideo = {
@@ -340,10 +354,19 @@ exports.deleteVideo = functions.https.onRequest(async (req, res) => {
         const videoFileName = `${userId}/${videoId}.mp4`;
         const thumbnailFileName = `${userId}/${videoId}.jpg`;
 
-        await Promise.all([
-            bucket.file(videoFileName).delete(),
-            bucket.file(thumbnailFileName).delete()
-        ]);
+        const videoFile = bucket.file(videoFileName);
+        const thumbnailFile = bucket.file(thumbnailFileName);
+
+        const [videoFileExists] = await videoFile.exists();
+        const [thumbnailFileExists] = await thumbnailFile.exists();
+
+        if(videoFileExists) {
+            await videoFile.delete();
+        }
+
+        if(thumbnailFileExists) {
+            await thumbnailFile.delete();
+        }
 
         // Delete metadata from Firestore in both 'videos' collection and user's 'videos' subcollection
         const videoDocRef = admin.firestore().collection('videos').doc(videoId);
@@ -353,6 +376,11 @@ exports.deleteVideo = functions.https.onRequest(async (req, res) => {
             videoDocRef.delete(),
             userVideoDocRef.delete()
         ]);
+
+        // Delete the video data from Algolia
+        const client = algoliasearch('TVN98P0Q4O', 'f01acee529c0a1a331f55c87791f6a95');
+        const index = client.initIndex('videos');
+        await index.deleteObject(videoId);
 
         res.status(200).send({success: true, message: 'Video and metadata deleted successfully.'});
     } catch (error) {
@@ -1400,7 +1428,7 @@ exports.getNotifications = functions.https.onRequest(async (req, res) => {
         res.status(200).send({
             videoMetadata: videoMetadata
         });
-       // return videoMetadata;
+        // return videoMetadata;
     } catch (error) {
         console.log('Error:' + error);
         res.status(400).send('Bad Request: ' + error);
@@ -1450,7 +1478,7 @@ exports.getToWatch = functions.https.onRequest(async (req, res) => {
 
         if (snapshot.empty) {
             console.log('No matching documents.');
-            res.status(200).send({ timestamp: null, items: [] }); // Update this line
+            res.status(200).send({timestamp: null, items: []}); // Update this line
             return;
         }
 
@@ -1474,7 +1502,7 @@ exports.getToWatch = functions.https.onRequest(async (req, res) => {
         // Convert the date to a Firestore timestamp
         const newLastCreatedAtTimestamp = admin.firestore.Timestamp.fromDate(newLastCreatedAt);
 
-        res.status(200).send({ timestamp: newLastCreatedAtTimestamp, items: items }); // Update this line
+        res.status(200).send({timestamp: newLastCreatedAtTimestamp, items: items}); // Update this line
     } catch (error) {
         console.log('Error:' + error);
         res.status(400).send('Bad Request: ' + error);
@@ -1508,7 +1536,7 @@ exports.removeToWatch = functions.https.onRequest(async (req, res) => {
         // delete the document
         await videoRef.delete();
 
-        res.status(200).send({ message: `Video ${videoId} removed from towatch list.` });
+        res.status(200).send({message: `Video ${videoId} removed from towatch list.`});
     } catch (error) {
         console.log('Error:' + error);
         res.status(400).send('Bad Request: ' + error);

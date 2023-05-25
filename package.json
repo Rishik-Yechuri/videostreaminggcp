@@ -4,6 +4,7 @@
     "@google-cloud/pubsub": "^3.6.0",
     "@google-cloud/storage": "^6.9.5",
     "@google-cloud/video-intelligence": "^4.2.2",
+    "algoliasearch": "^4.17.1",
     "axios": "^1.4.0",
     "cors": "^2.8.5",
     "firebase-functions": "^4.4.0",
