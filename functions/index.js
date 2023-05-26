@@ -45,6 +45,59 @@ exports.registerUser = functions.https.onRequest(async (req, res) => {
             bio: bio || '',
             accountCreation: admin.firestore.FieldValue.serverTimestamp(),
         };
+        await admin.firestore().collection('users').doc(userId).set(userData);
+        const algoliaPassword = await getSecretValue();
+        // Add new user to Algolia
+        const client = algoliasearch('TVN98P0Q4O', algoliaPassword);
+        const index = client.initIndex('users');
+        const algoliaData = { ...userData, objectID: userId };
+        await index.saveObject(algoliaData);
+
+        // Generate a signed URL for uploading the profile picture
+        const bucket = admin.storage().bucket('holdvideos');
+        const filename = `userInfo-${userId}/profilePic.jpg`;
+        const fileRef = bucket.file(filename);
+
+        const signedUrlOptions = {
+            version: 'v4',
+            action: 'write',
+            expires: Date.now() + 15 * 60 * 1000, // 15 minutes
+            contentType: 'image/jpeg',
+        };
+
+        const signedUrl = await fileRef.getSignedUrl(signedUrlOptions);
+
+        res.status(200).send({success: true, userId, signedUrl});
+    } catch (error) {
+        res.status(400).send({success: false, error: error.message});
+    }
+    async function getSecretValue(name) {
+        const [version] = await secrets.accessSecretVersion({
+            name: `projects/556024614451/secrets/AlgoliaAPIKey/versions/latest`,
+        });
+        return version.payload?.data?.toString();
+    }
+});
+
+/*exports.registerUser = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
+
+    const {email, password, username, bio} = req.body;
+
+    try {
+        const userRecord = await admin.auth().createUser({email, password});
+        const userId = userRecord.uid;
+
+        const userData = {
+            email,
+            username: username || email,
+            profilePic: '',
+            bio: bio || '',
+            accountCreation: admin.firestore.FieldValue.serverTimestamp(),
+        };
 
         await admin.firestore().collection('users').doc(userId).set(userData);
 
@@ -66,7 +119,7 @@ exports.registerUser = functions.https.onRequest(async (req, res) => {
     } catch (error) {
         res.status(400).send({success: false, error: error.message});
     }
-});
+});*/
 
 exports.signInUser = functions.https.onRequest(async (req, res) => {
     if (req.method !== 'POST') {
@@ -169,9 +222,9 @@ exports.generateSignedUrl = functions.https.onRequest(async (req, res) => {
                 userVideoRef.set(videoData, {merge: true})
             ]);
 
-
+            const algoliaPassword = await getSecretValue();
             // Initialize Algolia client
-            const client = algoliasearch('TVN98P0Q4O', 'f01acee529c0a1a331f55c87791f6a95');
+            const client = algoliasearch('TVN98P0Q4O', algoliaPassword);
             const index = client.initIndex('videos');
 
             // Add to Algolia index
@@ -185,6 +238,12 @@ exports.generateSignedUrl = functions.https.onRequest(async (req, res) => {
         });
     } catch (error) {
         res.status(401).send("Error: " + error.message);
+    }
+    async function getSecretValue(name) {
+        const [version] = await secrets.accessSecretVersion({
+            name: `projects/556024614451/secrets/AlgoliaAPIKey/versions/latest`,
+        });
+        return version.payload?.data?.toString();
     }
 });
 
@@ -234,11 +293,25 @@ exports.updateUser = functions.https.onRequest(async (req, res) => {
 
         await userRef.set(updates, {merge: true});
 
+        const algoliaPassword = await getSecretValue();
+        // Update user info in Algolia
+        const client = algoliasearch('TVN98P0Q4O', algoliaPassword);
+        const index = client.initIndex('users');
+        const algoliaData = { ...updates, objectID: userId };
+        await index.partialUpdateObject(algoliaData);
+
         res.status(200).send({success: true, message: 'User info updated', signedUrl});
     } catch (error) {
         res.status(400).send({success: false, error: error.message, token: idToken});
     }
+    async function getSecretValue(name) {
+        const [version] = await secrets.accessSecretVersion({
+            name: `projects/556024614451/secrets/AlgoliaAPIKey/versions/latest`,
+        });
+        return version.payload?.data?.toString();
+    }
 });
+
 exports.updateVideo = functions.https.onRequest(async (req, res) => {
     if (req.method !== 'POST') {
         res.status(405).send('Method Not Allowed');
@@ -291,9 +364,9 @@ exports.updateVideo = functions.https.onRequest(async (req, res) => {
                 videoDocRef.update(updateData),
                 userVideoDocRef.update(updateData)
             ]);
-
+            const algoliaPassword = await getSecretValue();
             // Update the video data in Algolia
-            const client = algoliasearch('TVN98P0Q4O', 'f01acee529c0a1a331f55c87791f6a95');
+            const client = algoliasearch('TVN98P0Q4O', algoliaPassword);
             const index = client.initIndex('videos');
             updateData.objectID = videoId;
             await index.partialUpdateObject(updateData);
@@ -329,6 +402,12 @@ exports.updateVideo = functions.https.onRequest(async (req, res) => {
         });
     } catch (error) {
         res.status(401).send("Error: " + error);
+    }
+    async function getSecretValue(name) {
+        const [version] = await secrets.accessSecretVersion({
+            name: `projects/556024614451/secrets/AlgoliaAPIKey/versions/latest`,
+        });
+        return version.payload?.data?.toString();
     }
 });
 
@@ -376,15 +455,21 @@ exports.deleteVideo = functions.https.onRequest(async (req, res) => {
             videoDocRef.delete(),
             userVideoDocRef.delete()
         ]);
-
+        const password = await getSecretValue();
         // Delete the video data from Algolia
-        const client = algoliasearch('TVN98P0Q4O', 'f01acee529c0a1a331f55c87791f6a95');
+        const client = algoliasearch('TVN98P0Q4O', password);
         const index = client.initIndex('videos');
         await index.deleteObject(videoId);
 
         res.status(200).send({success: true, message: 'Video and metadata deleted successfully.'});
     } catch (error) {
         res.status(401).send('Error: ' + error);
+    }
+    async function getSecretValue(name) {
+        const [version] = await secrets.accessSecretVersion({
+            name: `projects/556024614451/secrets/AlgoliaAPIKey/versions/latest`,
+        });
+        return version.payload?.data?.toString();
     }
 });
 
@@ -435,6 +520,7 @@ exports.getUserDetails = functions.https.onRequest(async (req, res) => {
         res.status(500).send({error: error.message});
     }
 });
+
 exports.deleteUser = functions.https.onRequest(async (req, res) => {
     if (req.method !== 'DELETE') {
         res.status(405).send('Method Not Allowed');
@@ -486,14 +572,30 @@ exports.deleteUser = functions.https.onRequest(async (req, res) => {
             await file.delete();
         }
 
+        // Delete the user's Firestore document
+        const userDocRef = admin.firestore().collection('users').doc(userId);
+        await userDocRef.delete();
+
         // Delete the user's account
         await admin.auth().deleteUser(userId);
+        const algoliaPassword = await getSecretValue();
+        // Delete the user data from Algolia
+        const client = algoliasearch('TVN98P0Q4O', algoliaPassword);
+        const index = client.initIndex('users');
+        await index.deleteObject(userId);
 
         res.status(200).send('User deleted successfully');
     } catch (error) {
         res.status(500).send({error: error.message});
     }
+    async function getSecretValue(name) {
+        const [version] = await secrets.accessSecretVersion({
+            name: `projects/556024614451/secrets/AlgoliaAPIKey/versions/latest`,
+        });
+        return version.payload?.data?.toString();
+    }
 });
+
 exports.getVideo = functions.https.onRequest(async (req, res) => {
     if (req.method !== 'GET') {
         res.status(405).send('Method Not Allowed');
@@ -1540,5 +1642,71 @@ exports.removeToWatch = functions.https.onRequest(async (req, res) => {
     } catch (error) {
         console.log('Error:' + error);
         res.status(400).send('Bad Request: ' + error);
+    }
+});
+exports.searchVideos = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'GET') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
+
+    const searchString = req.query.searchString;
+    if (!searchString) {
+        res.status(400).send('Bad Request: No search query provided');
+        return;
+    }
+
+    const numResults = req.query.numResults ? Number(req.query.numResults) : 10;
+    const pageNum = req.query.pageNum ? Number(req.query.pageNum) : 0;
+
+    try {
+        const client = algoliasearch('TVN98P0Q4O', 'f01acee529c0a1a331f55c87791f6a95');
+        const index = client.initIndex('videos');
+
+        const response = await index.search(searchString, { hitsPerPage: numResults, page: pageNum });
+
+        const videos = response.hits;
+
+        res.status(200).send({
+            success: true,
+            videos,
+            nbPages: response.nbPages,
+            page: response.page,
+        });
+    } catch (error) {
+        res.status(500).send('Error: ' + error);
+    }
+});
+exports.searchUsers = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'GET') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
+
+    const searchString = req.query.searchString;
+    if (!searchString) {
+        res.status(400).send('Bad Request: No search query provided');
+        return;
+    }
+
+    const numResults = req.query.numResults ? Number(req.query.numResults) : 10;
+    const pageNum = req.query.pageNum ? Number(req.query.pageNum) : 0;
+
+    try {
+        const client = algoliasearch('TVN98P0Q4O', 'f01acee529c0a1a331f55c87791f6a95');
+        const index = client.initIndex('users');
+
+        const response = await index.search(searchString, { hitsPerPage: numResults, page: pageNum });
+
+        const users = response.hits;
+
+        res.status(200).send({
+            success: true,
+            users,
+            nbPages: response.nbPages,
+            page: response.page,
+        });
+    } catch (error) {
+        res.status(500).send('Error: ' + error);
     }
 });
