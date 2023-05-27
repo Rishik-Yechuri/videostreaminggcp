@@ -79,47 +79,6 @@ exports.registerUser = functions.https.onRequest(async (req, res) => {
     }
 });
 
-/*exports.registerUser = functions.https.onRequest(async (req, res) => {
-    if (req.method !== 'POST') {
-        res.status(405).send('Method Not Allowed');
-        return;
-    }
-
-    const {email, password, username, bio} = req.body;
-
-    try {
-        const userRecord = await admin.auth().createUser({email, password});
-        const userId = userRecord.uid;
-
-        const userData = {
-            email,
-            username: username || email,
-            profilePic: '',
-            bio: bio || '',
-            accountCreation: admin.firestore.FieldValue.serverTimestamp(),
-        };
-
-        await admin.firestore().collection('users').doc(userId).set(userData);
-
-        // Generate a signed URL for uploading the profile picture
-        const bucket = admin.storage().bucket('holdvideos');
-        const filename = `userInfo-${userId}/profilePic.jpg`;
-        const fileRef = bucket.file(filename);
-
-        const signedUrlOptions = {
-            version: 'v4',
-            action: 'write',
-            expires: Date.now() + 15 * 60 * 1000, // 15 minutes
-            contentType: 'image/jpeg',
-        };
-
-        const signedUrl = await fileRef.getSignedUrl(signedUrlOptions);
-
-        res.status(200).send({success: true, userId, signedUrl});
-    } catch (error) {
-        res.status(400).send({success: false, error: error.message});
-    }
-});*/
 
 exports.signInUser = functions.https.onRequest(async (req, res) => {
     if (req.method !== 'POST') {
@@ -429,6 +388,9 @@ exports.deleteVideo = functions.https.onRequest(async (req, res) => {
         const userId = decodedToken.uid;
         const videoId = req.body.videoId;
 
+        // Initialize the storage bucket
+        const bucket = admin.storage().bucket('holdvideos');
+
         // Delete video file and thumbnail from storage
         const videoFileName = `${userId}/${videoId}.mp4`;
         const thumbnailFileName = `${userId}/${videoId}.jpg`;
@@ -455,6 +417,7 @@ exports.deleteVideo = functions.https.onRequest(async (req, res) => {
             videoDocRef.delete(),
             userVideoDocRef.delete()
         ]);
+
         const password = await getSecretValue();
         // Delete the video data from Algolia
         const client = algoliasearch('TVN98P0Q4O', password);
@@ -465,7 +428,8 @@ exports.deleteVideo = functions.https.onRequest(async (req, res) => {
     } catch (error) {
         res.status(401).send('Error: ' + error);
     }
-    async function getSecretValue(name) {
+
+    async function getSecretValue() {
         const [version] = await secrets.accessSecretVersion({
             name: `projects/556024614451/secrets/AlgoliaAPIKey/versions/latest`,
         });
@@ -1496,6 +1460,7 @@ exports.notifyNewVideoUpload = functions.storage.bucket('holdvideos').object().o
         return version.payload?.data?.toString();
     }
 });
+
 exports.getNotifications = functions.https.onRequest(async (req, res) => {
     if (req.method !== 'POST') {
         res.status(405).send('Method Not Allowed');
@@ -1708,5 +1673,46 @@ exports.searchUsers = functions.https.onRequest(async (req, res) => {
         });
     } catch (error) {
         res.status(500).send('Error: ' + error);
+    }
+});
+
+exports.analyzeVideo = functions.storage.bucket('holdvideos').object().onFinalize(async (object) => {
+    const filePath = object.name;
+    const fileBucket = object.bucket;
+    const contentType = object.contentType;
+
+    if (!filePath || !contentType || !contentType.includes('video/mp4')) {
+        console.log('This is not an mp4 file.');
+        return;
+    }
+
+    const videoUrl = `gs://${fileBucket}/${filePath}`;
+    console.log(`Video uploaded at ${videoUrl}`);
+    const secretValue = await getSecretValue('RequiredCloudRunPassword');
+
+    // Add any necessary headers
+    const headers = {
+        'Content-Type': 'application/json',
+        'X-Shared-Secret': secretValue
+    };
+
+    const data = {
+        videoUrl: videoUrl
+    };
+
+    const cloudRunUrl = 'https://analyzevideo-nm7za3okoq-uc.a.run.app';
+
+    try {
+        const response = await axios.post(cloudRunUrl, data, { headers });
+        console.log(`Cloud Run Response: ${response.status}`);
+    } catch (error) {
+        console.error('Error calling Cloud Run:', error);
+    }
+    async function getSecretValue(name) {
+        const [version] = await secrets.accessSecretVersion({
+            name: `projects/556024614451/secrets/${name}/versions/latest`,
+        });
+
+        return version.payload?.data?.toString();
     }
 });
