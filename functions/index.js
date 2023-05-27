@@ -192,6 +192,7 @@ exports.generateSignedUrl = functions.https.onRequest(async (req, res) => {
 
         res.status(200).send({
             success: true,
+            videoId: videoId,
             videoSignedUrl: videoSignedUrl[0],
             thumbnailSignedUrl: thumbnailSignedUrl[0],
         });
