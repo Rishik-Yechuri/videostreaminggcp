@@ -1,7 +1,9 @@
 const functions = require('firebase-functions');
 const admin = require('firebase-admin');
 const algoliasearch = require('algoliasearch');
-
+// Sending event data to BigQuery
+const {BigQuery} = require('@google-cloud/bigquery');
+const bigquery = new BigQuery();
 const axios = require('axios');
 const {get} = require('axios');
 const {GoogleAuth} = require('google-auth-library');
@@ -11,7 +13,10 @@ const Multer = require('multer');
 const {Storage} = require('@google-cloud/storage');
 const {PubSub} = require('@google-cloud/pubsub');
 const storage = new Storage();
+const {CloudTasksClient} = require('@google-cloud/tasks');
+
 const bucket = storage.bucket('holdvideos');
+
 const videoIntelligence = require('@google-cloud/video-intelligence').v1;
 const pubSubClient = new PubSub();
 const {SecretManagerServiceClient} = require('@google-cloud/secret-manager');
@@ -560,7 +565,6 @@ exports.deleteUser = functions.https.onRequest(async (req, res) => {
         return version.payload?.data?.toString();
     }
 });
-
 exports.getVideo = functions.https.onRequest(async (req, res) => {
     if (req.method !== 'GET') {
         res.status(405).send('Method Not Allowed');
@@ -580,8 +584,8 @@ exports.getVideo = functions.https.onRequest(async (req, res) => {
         userId = decodedToken.uid;
     } catch (error) {
         res.status(500).send({error: error.message});
-
     }
+
     if (!videoId || !userId) {
         res.status(400).send('Bad Request: Missing video ID or user ID');
         return;
@@ -626,10 +630,12 @@ exports.getVideo = functions.https.onRequest(async (req, res) => {
             const userRef = admin.firestore().collection('users').doc(userId);
             const logsRef = userRef.collection('logs');
 
-            await logsRef.add({
+            // Add or update a log with the videoId
+            await logsRef.doc(videoId).set({
                 videoId: videoId,
                 timestamp: admin.firestore.FieldValue.serverTimestamp(),
-            });
+            }, { merge: true });
+
         } else {
             res.status(404).send('Not Found: Video does not exist');
         }
@@ -637,6 +643,7 @@ exports.getVideo = functions.https.onRequest(async (req, res) => {
         res.status(500).send({error: error.message});
     }
 });
+
 
 exports.listUserVideos = functions.https.onRequest(async (req, res) => {
     if (req.method !== 'POST') {
@@ -748,43 +755,49 @@ exports.requestView = functions.https.onRequest(async (req, res) => {
             return;
         }
 
+        const videoData = videoDoc.data();
+        const channelId = videoData.channelName; // make sure your Firestore document has a channelId field
+
         const userRef = admin.firestore().collection('users').doc(userId);
         const logsRef = userRef.collection('logs');
-        const logsQuery = logsRef.orderBy('timestamp', 'desc').limit(1);
-        const logsSnapshot = await logsQuery.get();
+        const viewLogsRef = userRef.collection('viewLogs');
 
-        if (logsSnapshot.empty) {
-            res.status(400).send('Bad Request: No video has been accessed yet');
+        const fetchLog = await logsRef.doc(videoId).get();
+        const viewLog = await viewLogsRef.doc(videoId).get();
+
+        if (!fetchLog.exists) {
+            res.status(400).send('Bad Request: Video has not been fetched');
             return;
         }
 
-        const lastLog = logsSnapshot.docs[0].data();
-
-        if (lastLog.videoId !== videoId) {
-            res.status(400).send('Bad Request: Different video was last accessed');
+        if (viewLog.exists) {
+            res.status(400).send('Bad Request: Video has already been viewed');
             return;
         }
 
-        const lastLogTimestamp = lastLog.timestamp.toDate();
-        const currentTime = new Date();
-        const timeDiff = currentTime - lastLogTimestamp;
+        // If the video has been fetched but not viewed, record the view and increment the view count
+        await viewLogsRef.doc(videoId).set({
+            videoId: videoId,
+            timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        });
 
-        const videoFilePath = `${videoDoc.data().userId}/${videoId}.mp4`;
-        const videoFile = storage.bucket('holdvideos').file(videoFilePath);
-        const [videoMetadata] = await videoFile.getMetadata();
-
-        const videoDuration = videoMetadata.timeCreated ? (videoMetadata.timeCreated / 1000) : 0; // Assuming the video duration is in seconds
-        const requiredTimeDiff = videoDuration * 0.8 * 1000; // Convert to milliseconds
-
-        if (timeDiff < requiredTimeDiff) {
-            res.status(400).send('Bad Request: Not enough time has passed since the video was accessed');
-            return;
-        }
-
-        // If all checks pass, increment the view count
         await videoRef.update({views: admin.firestore.FieldValue.increment(1)});
 
-        res.status(200).send({success: true, length: videoDuration});
+        // Record the view in BigQuery
+        const bigQueryClient = new BigQuery();
+        const rows = [{
+            userId: userId,
+            videoId: videoId,
+            channelId: channelId, // add channelId here
+            timestamp: BigQuery.timestamp(new Date()), // current time
+        }];
+        await bigQueryClient
+            .dataset('topic_dataset')
+            .table('views')
+            .insert(rows);
+        console.log(`Recorded view for video ${videoId} by user ${userId} in BigQuery.`);
+
+        res.status(200).send({success: true});
     } catch (error) {
         res.status(500).send({error: error.message});
     }
@@ -1715,5 +1728,323 @@ exports.analyzeVideo = functions.storage.bucket('holdvideos').object().onFinaliz
         });
 
         return version.payload?.data?.toString();
+    }
+});
+exports.getTrendingTopics = functions.https.onRequest(async (req, res) => {
+    const query = `
+    SELECT topic
+    FROM \`videostreaming-3845.topic_dataset.trending\`
+  `;
+
+    const options = {
+        query: query,
+        location: 'US',
+    };
+
+    let topics = [];
+
+    try {
+        const [rows] = await bigquery.query(options);
+        rows.forEach(row => topics.push(row.topic));
+    } catch (error) {
+        res.status(500).send({
+            success: false,
+            error: error.message
+        });
+        return;
+    }
+
+    res.status(200).send({
+        success: true,
+        topics: topics
+    });
+});
+exports.getTrendingVideos = functions.https.onRequest(async (req, res) => {
+    const { topic, page = 0, limit = 10 } = req.query;
+    const maxLimit = 10;
+    const videosPerPage = Math.min(limit, maxLimit);
+
+    // check if topic is trending
+    let trendingTopics = [];
+    try {
+        const [rows] = await bigquery.query({
+            query: 'SELECT topic FROM `videostreaming-3845.topic_dataset.trending`',
+            location: 'US'
+        });
+        trendingTopics = rows.map(row => row.topic);
+    } catch (error) {
+        res.status(500).send({
+            success: false,
+            error: error.message
+        });
+        return;
+    }
+
+    if (!trendingTopics.includes(topic)) {
+        res.status(400).send({
+            success: false,
+            error: `Topic '${topic}' is not trending`
+        });
+        return;
+    }
+
+    // retrieve videos
+    const offset = page * videosPerPage;
+    let videos = [];
+    let totalVideos = 0;
+    try {
+        const [rows] = await bigquery.query({
+            query: `
+        SELECT *
+        FROM \`videostreaming-3845.topic_dataset.trending_videos\`
+        WHERE topic = @topic
+        ORDER BY createdAt DESC
+        LIMIT @limit
+        OFFSET @offset
+      `,
+            params: {
+                topic: topic,
+                limit: videosPerPage,
+                offset: offset
+            },
+            location: 'US'
+        });
+        videos = rows.map(row => ({...row, createdAt: row.createdAt.value}));
+
+        const [totalRows] = await bigquery.query({
+            query: `
+        SELECT COUNT(*) as total
+        FROM \`videostreaming-3845.topic_dataset.trending_videos\`
+        WHERE topic = @topic
+      `,
+            params: {
+                topic: topic
+            },
+            location: 'US'
+        });
+        totalVideos = totalRows[0].total;
+    } catch (error) {
+        res.status(500).send({
+            success: false,
+            error: error.message
+        });
+        return;
+    }
+
+    const totalPages = Math.ceil(totalVideos / videosPerPage);
+
+    res.status(200).send({
+        success: true,
+        videos: videos,
+        totalPages: totalPages
+    });
+});
+exports.createSimilarUsersTable = functions.pubsub.schedule('every 1 minutes').onRun(async (context) => {
+    const query1 = `
+        CREATE OR REPLACE TABLE \`videostreaming-3845.topic_dataset.similar_users\` AS
+        SELECT a.userId AS user1,
+               b.userId AS user2,
+               COUNT(*) AS common_videos
+        FROM \`videostreaming-3845.topic_dataset.views\` a
+        JOIN \`videostreaming-3845.topic_dataset.views\` b
+        ON a.videoId = b.videoId
+        WHERE a.userId <> b.userId
+        GROUP BY a.userId, b.userId
+        HAVING common_videos > 5
+        ORDER BY common_videos DESC;
+    `;
+
+    await bigquery.query(query1);
+
+    const query2 = `
+        CREATE OR REPLACE TABLE \`videostreaming-3845.topic_dataset.user_similarities\` AS
+        SELECT user1 AS userId, ARRAY_AGG(user2) AS similarUsers
+        FROM \`videostreaming-3845.topic_dataset.similar_users\`
+        GROUP BY user1;
+    `;
+
+    await bigquery.query(query2);
+
+    console.log('User similarities table updated successfully.');
+});
+exports.generatePrivateSignedUrl = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
+
+    const authToken = req.headers.auth;
+
+    if (!authToken) {
+        res.status(401).send('Unauthorized: No token provided');
+        return;
+    }
+
+    try {
+        console.log("Received token:", authToken);
+        const decodedToken = await admin.auth().verifyIdToken(authToken);
+        console.log("Decoded token:", decodedToken);
+        const userId = decodedToken.uid;
+        const metadata = req.body.metadata;
+
+        const signedUrlOptionsVideo = {
+            version: 'v4',
+            action: 'write',
+            expires: Date.now() + 15 * 60 * 1000, // 15 minutes
+            contentType: 'video/mp4',
+        };
+
+        const signedUrlOptionsThumbnail = {
+            version: 'v4',
+            action: 'write',
+            expires: Date.now() + 15 * 60 * 1000, // 15 minutes
+            contentType: 'image/jpeg',
+        };
+
+        const videoId = uuidv4();
+        const videoFileName = `${userId}/${videoId}.mp4`; // Assuming .mp4 format
+        const videoFile = bucket.file(videoFileName);
+        const videoSignedUrl = await videoFile.getSignedUrl(signedUrlOptionsVideo);
+
+        const thumbnailFileName = `${userId}/${videoId}.jpg`; // Assuming .jpg format
+        const thumbnailFile = bucket.file(thumbnailFileName);
+        const thumbnailSignedUrl = await thumbnailFile.getSignedUrl(signedUrlOptionsThumbnail);
+
+        const userRef = admin.firestore().collection('users').doc(userId);
+        const userDoc = await userRef.get();
+
+        const videoData = {
+            objectID: videoId, // Add an objectId for Algolia
+            userId: userId,
+            videoUrl: videoFileName,
+            thumbnailUrl: thumbnailFileName,
+            views: 0,
+            likes: 0,
+            dislikes: 0,
+            channelName: userDoc.data().username, // Fetching the username for channelName
+            createdAt: admin.firestore.FieldValue.serverTimestamp() // Add a server timestamp for 'createdAt'
+        };
+
+        if (metadata.title) {
+            videoData.title = metadata.title;
+        }
+
+        if (metadata.description) {
+            videoData.description = metadata.description;
+        }
+
+        if (Object.keys(videoData).length > 0) {
+            const userPrivateVideoRef = userRef.collection('privatevideos').doc(videoId);
+
+            // Write to user's 'privatevideos' subcollection
+            await userPrivateVideoRef.set(videoData, {merge: true});
+        }
+
+        res.status(200).send({
+            success: true,
+            videoId: videoId,
+            videoSignedUrl: videoSignedUrl[0],
+            thumbnailSignedUrl: thumbnailSignedUrl[0],
+        });
+    } catch (error) {
+        res.status(401).send("Error: " + error.message);
+    }
+});
+
+exports.scheduleVideoRelease = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
+
+    const authToken = req.headers.auth;
+    const videoId = req.body.videoId;
+    const releaseTime = req.body.releaseTime; // ISO 8601 format
+
+    if (!authToken || !videoId || !releaseTime) {
+        res.status(400).send('Bad Request: Missing token or video ID or release time');
+        return;
+    }
+
+    try {
+        const decodedToken = await admin.auth().verifyIdToken(authToken);
+        const userId = decodedToken.uid;
+
+        const project = 'videostreaming-3845';
+        const location = 'us-central1';
+        const queue = 'scheduled-video-release-queue';
+        const url = `https://${location}-${project}.cloudfunctions.net/makePrivatePublic`;
+        const serviceAccountEmail = `${project}@appspot.gserviceaccount.com`;
+
+        const client = new CloudTasksClient();
+
+        const parent = client.queuePath(project, location, queue);
+
+        const task = {
+            httpRequest: {
+                httpMethod: 'POST',
+                url: url,
+                oidcToken: {
+                    serviceAccountEmail: serviceAccountEmail,
+                },
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: Buffer.from(JSON.stringify({
+                    userId: userId,
+                    videoId: videoId
+                })).toString('base64'),
+            },
+            scheduleTime: {
+                seconds: new Date(releaseTime).getTime() / 1000,
+            },
+        };
+
+        await client.createTask({parent, task});
+
+        res.status(200).send({success: true});
+    } catch (error) {
+        res.status(500).send({error: error.message});
+    }
+});
+exports.makePrivatePublic = functions.https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
+
+    const userId = req.body.userId;
+    const videoId = req.body.videoId;
+
+    if (!userId || !videoId) {
+        res.status(400).send('Bad Request: Missing user ID or video ID');
+        return;
+    }
+
+    const userRef = admin.firestore().collection('users').doc(userId);
+    const privateVideoRef = userRef.collection('privatevideos').doc(videoId);
+    const publicVideoRef = admin.firestore().collection('videos').doc(videoId);
+    const userVideoRef = userRef.collection('videos').doc(videoId);
+
+    try {
+        const privateVideoDoc = await privateVideoRef.get();
+        const videoData = privateVideoDoc.data();
+
+        if (videoData) {
+            // Write to 'videos' collection and user's 'videos' subcollection
+            await Promise.all([
+                publicVideoRef.set(videoData, {merge: true}),
+                userVideoRef.set(videoData, {merge: true})
+            ]);
+
+            // Delete from 'privatevideos' subcollection
+            await privateVideoRef.delete();
+        }
+
+        res.status(200).send({
+            success: true
+        });
+    } catch (error) {
+        res.status(500).send("Error: " + error.message);
     }
 });
